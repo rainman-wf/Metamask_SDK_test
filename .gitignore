@@ -1,0 +1,6 @@
+.idea
+*.properties
+*/build
+.kotlin
+.gradle
+/app/src/main/java/ru/rainman/metamasksdktest/Private.kt
