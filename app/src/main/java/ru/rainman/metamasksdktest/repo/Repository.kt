@@ -1,5 +1,6 @@
 package ru.rainman.metamasksdktest.repo
 
+import android.graphics.ColorSpace.match
 import android.util.Log
 import io.metamask.androidsdk.EthereumFlowWrapper
 import io.metamask.androidsdk.Result
@@ -7,9 +8,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.stateIn
-import org.web3j.abi.EventEncoder
 import org.web3j.abi.FunctionEncoder
-import org.web3j.abi.FunctionReturnDecoder
 import org.web3j.abi.TypeReference
 import org.web3j.abi.datatypes.Address
 import org.web3j.abi.datatypes.Bool
@@ -18,21 +17,26 @@ import org.web3j.abi.datatypes.Function
 import org.web3j.abi.datatypes.Type
 import org.web3j.abi.datatypes.generated.Uint256
 import org.web3j.crypto.Credentials
+import org.web3j.crypto.ECDSASignature
+import org.web3j.crypto.Hash
+import org.web3j.crypto.Keys
 import org.web3j.crypto.RawTransaction
 import org.web3j.crypto.Sign
+import org.web3j.crypto.Sign.SignatureData
 import org.web3j.crypto.TransactionEncoder
-import ru.rainman.metamasksdktest.CONTRACT_ADDRESS
-import ru.rainman.metamasksdktest.VERIFIER
-import ru.rainman.metamasksdktest.WALLET_PRIVATE
+import ru.rainman.metamasksdktest.*
 import ru.rainman.metamasksdktest.network.EthereumJRPCApi
 import ru.rainman.metamasksdktest.network.dto.contract.NewChannel
 import ru.rainman.metamasksdktest.network.dto.eth.Params
 import ru.rainman.metamasksdktest.network.dto.eth.RequestBody
-import ru.rainman.metamasksdktest.network.dto.eth.TransactionReceipt
 import ru.rainman.metamasksdktest.repo.model.ChannelMeta
 import java.math.BigInteger
 import javax.inject.Inject
 import javax.inject.Singleton
+import kotlin.text.Charsets.UTF_16
+import kotlin.text.Charsets.UTF_32
+import kotlin.text.Charsets.UTF_8
+
 
 @Singleton
 class Repository @Inject constructor(
@@ -43,17 +47,11 @@ class Repository @Inject constructor(
     private val connection =
         ethereum.ethereumState.stateIn(CoroutineScope(Dispatchers.IO), SharingStarted.Eagerly, null)
 
-    suspend fun createChannel(newChannel: NewChannel): ChannelMeta? {
+    suspend fun createChannel(newChannel: NewChannel): String {
 
-        val metamask = true // switch sign otpions
-
-        val state = connection.value ?: return null
-
-        val chainId = state.chainId.removePrefix("0x").toLong(16)
-
-        val address = state.selectedAddress
-
-        if (address.isNullOrEmpty()) return null
+        val address = SUPER_ADMIN_ADRESS
+        val chainId = TEST_CHAIN_ID // 1337
+        val private = SUPER_ADMIN_PRIVATE
 
         val function = buildFunction(newChannel) // your function
 
@@ -68,21 +66,26 @@ class Repository @Inject constructor(
             encodedFunction
         )
 
-        val txSign = signTransaction(transaction, chainId, metamask)
+        val encoded = TransactionEncoder.encode(transaction, chainId)
 
-        val transactionHash = sendTransactionAndGetHash(txSign)
+        val vrs = arrayOf(
+            Sign.signatureDataFromHex((ethereum.connectSign("0x" + encoded.toHex()) as? Result.Success.Item)?.value!!),
+            Sign.signMessage(encoded, Credentials.create(private).ecKeyPair)
+        )
 
-        val transactionReceipt = getTransactionReceipt(transactionHash)
+        val metaSign = vrs[0].r.plus(vrs[0].s).plus(vrs[0].v).toHex()
+        val web3sign = vrs[1].r.plus(vrs[1].s).plus(vrs[1].v).toHex()
 
-        val channelAddress = fetchChannelAddress(transactionReceipt)
+        val txSign = signTransaction(transaction, chainId, vrs[1])
 
-        val getChannelFunc = createGetChannelFunction(channelAddress)
+        Log.i("TAG", "createChannel: metaSign = $metaSign")
+        Log.i("TAG", "createChannel: web3Sign = $web3sign")
 
-        val getChannelResult = getChannelByAddress(getChannelFunc, address)
+        testRecoverAddressFromSignature(vrs[0], encoded.toHex())
+        testRecoverAddressFromSignature(vrs[1], encoded.toHex())
 
-        return getChannelResult
+        return sendTransactionAndGetHash(txSign)
     }
-
 
     private fun buildFunction(newChannel: NewChannel): Function {
         val _title = DynamicBytes(newChannel.title.toByteArray())
@@ -155,12 +158,8 @@ class Repository @Inject constructor(
     private suspend fun signTransaction(
         transaction: RawTransaction,
         chainId: Long,
-        metamask: Boolean,
+        signedData: Sign.SignatureData,
     ): String {
-
-        val encoded = TransactionEncoder.encode(transaction, chainId)
-
-        val signedData = getSignData(encoded, metamask)
 
         val eipSign = TransactionEncoder.createEip155SignatureData(
             signedData,
@@ -172,20 +171,10 @@ class Repository @Inject constructor(
         return txSigned.toHex();
     }
 
-    private suspend fun getSignData(
-        encodedTransaction: ByteArray,
-        metamask: Boolean,
-    ): Sign.SignatureData {
-        return if (metamask)
-            Sign.signatureDataFromHex(
-                (ethereum.connectSign(encodedTransaction.toHex()) as? Result.Success.Item)?.value!!
-            )
-        else Sign.signMessage(encodedTransaction, Credentials.create(WALLET_PRIVATE).ecKeyPair)
-    }
-
-    @OptIn(ExperimentalStdlibApi::class)
     private fun ByteArray.toHex(): String {
-        return "0x${toHexString(HexFormat.Default)}"
+       return map {
+            String.format("%02x", it)
+        }.joinToString("")
     }
 
     private suspend fun sendTransactionAndGetHash(transactionSign: String): String {
@@ -204,63 +193,24 @@ class Repository @Inject constructor(
         }.result ?: throw RuntimeException("Result is null")
     }
 
-    private suspend fun getTransactionReceipt(hash: String): TransactionReceipt {
-        return ethereumApi.getTransactionReceipt(
-            RequestBody(
-                id = 1,
-                jsonrpc = "2.0",
-                method = "eth_getTransactionReceipt",
-                params = listOf(
-                    Params.Text(hash)
+    fun testRecoverAddressFromSignature(sd: SignatureData, message: String) {
+
+        val PERSONAL_MESSAGE_PREFIX: String = "\u0019Ethereum Signed Message:\n"
+
+        val prefix: String = PERSONAL_MESSAGE_PREFIX + message.length
+        val msgHash = Hash.sha3((prefix + message).toByteArray())
+
+        for (i in 0..3) {
+            val publicKey =
+                Sign.recoverFromSignature(
+                    i,
+                    ECDSASignature(BigInteger(1, sd.r), BigInteger(1, sd.s)),
+                    msgHash
                 )
-            )
-        ).let {
-            it.errorBody()
-                ?.let { throw RuntimeException(it.string()) }
-                ?: it.body()
-                ?: throw RuntimeException("Response body is null")
-        }.result ?: throw RuntimeException("Result is null")
-    }
+            publicKey?.let {
+                Log.d("TAG", "fetch adress: 0x${Keys.getAddress(it)}")
+            }
 
-    private fun fetchChannelAddress(transactionReceipt: TransactionReceipt): String {
-
-        val eventHash = EventEncoder.buildEventSignature("channelCreated(address)")
-
-        val log = transactionReceipt.logs
-            .singleOrNull { it.topics[0] == eventHash }
-            ?: throw RuntimeException("Target log is not exists")
-
-        return log.topics[1]
-    }
-
-    private suspend fun createGetChannelFunction(channelAddress: String): Function {
-        return Function(
-            "getChannelByAddress",
-            listOf<Type<*>>(Address(channelAddress)),
-            listOf<TypeReference<*>>(object : TypeReference<ChannelMeta>() {})
-        )
-    }
-
-    private suspend fun getChannelByAddress(function: Function, myAddress: String): ChannelMeta {
-        val response = ethereumApi.ethCall(
-            RequestBody(
-                method = "eth_call",
-                jsonrpc = "2.0",
-                id = 1,
-                params = listOf(
-                    Params.Input(
-                        from = myAddress,
-                        to = CONTRACT_ADDRESS,
-                        input = FunctionEncoder.encode(function)
-                    )
-                )
-            )
-        ).let {
-            it.errorBody()?.let {
-                throw RuntimeException(it.string())
-            } ?: it.body() ?: throw RuntimeException("Response body is null")
-        }.result ?: throw RuntimeException("Result is null")
-
-        return FunctionReturnDecoder.decode(response, function.outputParameters)[0] as ChannelMeta
+        }
     }
 }

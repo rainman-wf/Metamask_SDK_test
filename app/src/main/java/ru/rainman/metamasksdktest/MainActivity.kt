@@ -48,14 +48,19 @@ adress = ${it.selectedAddress}
             viewModel.sendTransaction()
         }
 
+        viewModel.channel.observe(this) {
+            this?.let {
+                binding.result.text = it
+            }
+        }
     }
 
     private fun <T> Flow<T>.observe(viewLifecycleOwner: LifecycleOwner, collector: T.() -> Unit) {
         viewLifecycleOwner.lifecycleScope.launch {
             viewLifecycleOwner.repeatOnLifecycle(Lifecycle.State.CREATED) {
-                this@observe.distinctUntilChanged { old, new -> new == old }.collect {
-                    collector(it)
-                }
+                this@observe
+                    .distinctUntilChanged { old, new -> new == old }
+                    .collect { collector(it) }
             }
         }
     }

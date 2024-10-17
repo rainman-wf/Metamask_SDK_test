@@ -30,8 +30,8 @@ class ActivityViewModel @Inject constructor(
         ethereum.ethereumState.stateIn(CoroutineScope(Dispatchers.IO), SharingStarted.Eagerly, null)
 
 
-    private val _channel = MutableStateFlow<ChannelMeta?>(null)
-    val channel: StateFlow<ChannelMeta?> get() = _channel
+    private val _channel = MutableStateFlow<String?>(null)
+    val channel: StateFlow<String?> get() = _channel
 
     fun connect() {
         viewModelScope.launch { ethereum.connect() }
@@ -42,7 +42,7 @@ class ActivityViewModel @Inject constructor(
             val result = try {
                 repository.createChannel(NewChannel("Title", "Descritpion", false, 0))
             } catch (e: Exception) {
-                Log.d("TAG", "sendTransaction: ${e.message}")
+                Log.d("TAG", "ViewModel : sendTransaction: ${e.message}")
                 null
             }
             _channel.emit(result)
